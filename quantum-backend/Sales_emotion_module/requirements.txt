@@ -1,0 +1,33 @@
+# Web Framework and Server
+fastapi
+uvicorn
+python-multipart
+jinja2
+streamlit
+
+# Data Processing and Visualization
+pandas
+plotly
+kaleido
+numpy
+
+# Deep Learning
+torch
+torchvision
+tensorflow
+keras
+
+# Computer Vision
+opencv-python
+
+# PDF Generation
+fpdf
+reportlab
+
+# Environment Variables
+python-dotenv
+
+# Screen Capture (for Google Meet analysis)
+mss
+Pillow
+pyautogui
