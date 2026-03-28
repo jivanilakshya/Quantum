@@ -59,13 +59,16 @@ async def process_meeting(
         logger.info(f"Processing meeting {meeting_id}")
         
         # 1. Fetch transcript from Vexa
-        transcript_result = vexa_client.get_transcript(platform, meeting_id)
+        transcript_result = await vexa_client.get_transcript(platform, meeting_id)
         
         if not transcript_result or 'transcript' not in transcript_result:
+            logger.error(f"Transcript not found in Vexa result for {meeting_id}")
             raise HTTPException(status_code=404, detail="Transcript not found")
         
         # Parse transcript
         transcript_data = transcript_result['transcript']
+        logger.info(f"Retrieved transcript data type: {type(transcript_data)} for {meeting_id}")
+        
         if isinstance(transcript_data, str):
             transcript_segments = [{"text": transcript_data}]
             transcript_text = transcript_data
@@ -74,13 +77,31 @@ async def process_meeting(
             transcript_text = "\n".join([
                 f"{seg.get('speaker', 'Unknown')}: {seg.get('text', '')}"
                 for seg in transcript_segments
+                if seg.get('text') # Only include segments with text
             ])
+        elif isinstance(transcript_data, dict) and 'data' in transcript_data:
+            # Handle possible nested structure
+            logger.info(f"Handling nested dictionary transcript for {meeting_id}")
+            actual_data = transcript_data['data']
+            if isinstance(actual_data, list):
+                transcript_segments = actual_data
+                transcript_text = "\n".join([
+                    f"{seg.get('speaker', 'Unknown')}: {seg.get('text', '')}"
+                    for seg in transcript_segments
+                ])
+            else:
+                transcript_segments = [{"text": str(actual_data)}]
+                transcript_text = str(actual_data)
         else:
+            logger.warning(f"Unexpected transcript data format for {meeting_id}: {type(transcript_data)}")
             transcript_segments = []
             transcript_text = ""
         
-        if not transcript_text:
+        if not transcript_text or transcript_text.strip() == "":
+            logger.error(f"Empty transcript for {meeting_id}")
             raise HTTPException(status_code=400, detail="Empty transcript")
+        
+        logger.info(f"Successfully parsed transcript for {meeting_id}, length: {len(transcript_text)}")
         
         # 2. Create or update meeting record
         meeting = db.query(Meeting).filter(Meeting.meeting_id == meeting_id).first()
@@ -368,19 +389,19 @@ async def analyze_video_emotions(
     Analyze emotions from a video file using the emotion detection model.
     This endpoint processes video files and returns emotion analysis results.
     """
+    video_path = None
     try:
         # Validate file type
         if not file.content_type or not file.content_type.startswith('video/'):
             raise HTTPException(status_code=400, detail="File must be a video")
         
+        # Read file content
+        content = await file.read()
+        file_size = len(content)
+        
         # Check file size (limit to 500MB)
-        file_size = 0
-        content = b""
-        async for chunk in file.stream():
-            content += chunk
-            file_size += len(chunk)
-            if file_size > 500 * 1024 * 1024:  # 500MB limit
-                raise HTTPException(status_code=413, detail="File too large. Maximum size is 500MB.")
+        if file_size > 500 * 1024 * 1024:  # 500MB limit
+            raise HTTPException(status_code=413, detail="File too large. Maximum size is 500MB.")
         
         logger.info(f"Processing video emotion analysis for file: {file.filename}, Size: {file_size / 1024 / 1024:.2f} MB")
         

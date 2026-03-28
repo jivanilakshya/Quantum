@@ -8,7 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Brain, Calendar as CalendarIcon, Plus } from "lucide-react";
-import { mockMeetings, ActionItem } from "@/lib/mock-data";
+import { useTaskContext } from "@/lib/task-context";
 import { DndContext, DragEndEvent, closestCorners } from "@dnd-kit/core";
 import { SortableContext, verticalListSortingStrategy, useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
@@ -32,9 +32,10 @@ import {
 import { toast } from "sonner";
 
 // Extract all action items from meetings
-const allTasks: ActionItem[] = mockMeetings.flatMap((m) => m.actionItems);
+import { mockMeetings, ActionItem } from "@/lib/mock-data";
+import { Task } from "@/lib/task-context";
 
-function TaskCard({ task }: { task: ActionItem }) {
+function TaskCard({ task }: { task: Task }) {
     const { attributes, listeners, setNodeRef, transform, transition } = useSortable({ id: task.id });
 
     const style = {
@@ -60,22 +61,22 @@ function TaskCard({ task }: { task: ActionItem }) {
             <Card className="mb-3 cursor-move hover:shadow-md transition-shadow">
                 <CardContent className="p-4">
                     <div className="flex items-start justify-between mb-2">
-                        <h4 className="font-medium text-sm">{task.task}</h4>
+                        <h4 className="font-medium text-sm">{task.title}</h4>
                         <Badge variant="outline" className={getPriorityColor(task.priority)}>
                             {task.priority}
                         </Badge>
                     </div>
                     <div className="flex items-center gap-2 text-xs text-muted-foreground mb-3">
                         <CalendarIcon className="h-3 w-3" />
-                        {format(new Date(task.dueDate), "PP")}
+                        {format(task.dueDate, "PP")}
                     </div>
                     <div className="flex items-center gap-2">
                         <Avatar className="h-6 w-6">
                             <AvatarFallback className="text-xs">
-                                {task.owner.split(" ").map((n) => n[0]).join("")}
+                                {task.assignee?.split(" ").map((n) => n[0]).join("") || "N/A"}
                             </AvatarFallback>
                         </Avatar>
-                        <span className="text-xs text-muted-foreground">{task.owner}</span>
+                        <span className="text-xs text-muted-foreground">{task.assignee || "Unassigned"}</span>
                     </div>
                 </CardContent>
             </Card>
@@ -84,54 +85,62 @@ function TaskCard({ task }: { task: ActionItem }) {
 }
 
 export default function TasksPage() {
-    const [tasks, setTasks] = useState<Record<string, ActionItem[]>>({
-        todo: allTasks.filter((t) => t.status === "todo"),
-        "in-progress": allTasks.filter((t) => t.status === "in-progress"),
-        done: allTasks.filter((t) => t.status === "done"),
-    });
+    const { tasks: allContextTasks, addTask, updateTaskStatus } = useTaskContext();
     const [isDialogOpen, setIsDialogOpen] = useState(false);
     const [newTask, setNewTask] = useState({
-        task: "",
-        owner: "",
+        title: "",
+        assignee: "",
         dueDate: "",
         priority: "medium" as "high" | "medium" | "low",
         status: "todo" as "todo" | "in-progress" | "done",
     });
 
+    // Organize tasks by status
+    const tasks = {
+        todo: allContextTasks.filter((t) => t.status === "todo"),
+        "in-progress": allContextTasks.filter((t) => t.status === "in-progress"),
+        done: allContextTasks.filter((t) => t.status === "done"),
+    };
+
     const handleDragEnd = (event: DragEndEvent) => {
         const { active, over } = event;
         if (!over) return;
 
-        // In a real app, this would update the task status
-        console.log(`Moved task ${active.id} to ${over.id}`);
+        // Find which status column the task was moved to
+        const statusMap: Record<string, "todo" | "in-progress" | "done"> = {
+            todo: "todo",
+            "in-progress": "in-progress",
+            done: "done",
+        };
+
+        const newStatus = statusMap[over.id as string];
+        if (newStatus) {
+            updateTaskStatus(active.id as string, newStatus);
+            toast.success("Task status updated!");
+        }
     };
 
     const handleCreateTask = () => {
-        if (!newTask.task.trim() || !newTask.owner.trim() || !newTask.dueDate) {
+        if (!newTask.title.trim() || !newTask.assignee.trim() || !newTask.dueDate) {
             toast.error("Please fill in all required fields");
             return;
         }
 
         const taskId = `task-${Date.now()}`;
-        const newTaskItem: ActionItem = {
+        addTask({
             id: taskId,
-            task: newTask.task,
-            owner: newTask.owner,
-            dueDate: newTask.dueDate,
+            title: newTask.title,
+            description: "",
+            dueDate: new Date(newTask.dueDate),
             priority: newTask.priority,
             status: newTask.status,
-            meetingId: "",
-        };
-
-        setTasks((prev) => ({
-            ...prev,
-            [newTask.status]: [...prev[newTask.status], newTaskItem],
-        }));
+            assignee: newTask.assignee,
+        });
 
         // Reset form
         setNewTask({
-            task: "",
-            owner: "",
+            title: "",
+            assignee: "",
             dueDate: "",
             priority: "medium",
             status: "todo",
@@ -206,7 +215,7 @@ export default function TasksPage() {
                 <DndContext collisionDetection={closestCorners} onDragEnd={handleDragEnd}>
                     <div className="grid md:grid-cols-3 gap-6">
                         {/* To Do Column */}
-                        <div>
+                        <div id="todo">
                             <div className="mb-4">
                                 <div className="flex items-center justify-between mb-2">
                                     <h3 className="font-semibold">To Do</h3>
@@ -222,7 +231,7 @@ export default function TasksPage() {
                         </div>
 
                         {/* In Progress Column */}
-                        <div>
+                        <div id="in-progress">
                             <div className="mb-4">
                                 <div className="flex items-center justify-between mb-2">
                                     <h3 className="font-semibold">In Progress</h3>
@@ -238,7 +247,7 @@ export default function TasksPage() {
                         </div>
 
                         {/* Done Column */}
-                        <div>
+                        <div id="done">
                             <div className="mb-4">
                                 <div className="flex items-center justify-between mb-2">
                                     <h3 className="font-semibold">Done</h3>
@@ -302,8 +311,8 @@ export default function TasksPage() {
                             <Input
                                 id="task"
                                 placeholder="Enter task description"
-                                value={newTask.task}
-                                onChange={(e) => setNewTask({ ...newTask, task: e.target.value })}
+                                value={newTask.title}
+                                onChange={(e) => setNewTask({ ...newTask, title: e.target.value })}
                             />
                         </div>
 
@@ -312,8 +321,8 @@ export default function TasksPage() {
                             <Input
                                 id="owner"
                                 placeholder="Enter assignee name"
-                                value={newTask.owner}
-                                onChange={(e) => setNewTask({ ...newTask, owner: e.target.value })}
+                                value={newTask.assignee}
+                                onChange={(e) => setNewTask({ ...newTask, assignee: e.target.value })}
                             />
                         </div>
 

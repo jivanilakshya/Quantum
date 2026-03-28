@@ -97,8 +97,19 @@ async def start_bot(request: StartBotRequest):
         )
         
         # Request bot from Vexa
-        result = vexa_client.request_bot(bot_request)
+        result = await vexa_client.request_bot(bot_request)
         
+        # If bot is already running, handle it gracefully
+        if isinstance(result, dict) and result.get("already_running"):
+            logger.info(f"Bot already running for meeting {meeting_id}")
+            return {
+                "success": True,
+                "message": "Bot is already running for this meeting.",
+                "meeting_id": meeting_id,
+                "platform": request.platform,
+                "data": result
+            }
+            
         logger.info(f"Bot started for meeting {meeting_id}")
         
         return {
@@ -121,7 +132,7 @@ async def stop_bot(request: StopBotRequest):
     IMPORTANT: This frees up API credits
     """
     try:
-        result = vexa_client.stop_bot(request.platform, request.native_meeting_id)
+        result = await vexa_client.stop_bot(request.platform, request.native_meeting_id)
         
         logger.info(f"Bot stopped for meeting {request.native_meeting_id}")
         
@@ -142,7 +153,7 @@ async def get_bot_status():
     Get status of all running bots
     """
     try:
-        bots = vexa_client.get_bot_status()
+        bots = await vexa_client.get_bot_status()
         
         return {
             "success": True,
@@ -165,7 +176,7 @@ async def update_bot_language(
     Update bot language during a meeting
     """
     try:
-        result = vexa_client.update_bot_config(
+        result = await vexa_client.update_bot_config(
             platform=platform,
             native_meeting_id=meeting_id,
             language=request.language

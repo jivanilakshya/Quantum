@@ -12,6 +12,7 @@ import { mockMeetings, Meeting } from "@/lib/mock-data";
 import { format } from "date-fns";
 import { apiClient } from "@/lib/api-client";
 import { toast } from "sonner";
+import { useTaskContext, Task } from "@/lib/task-context";
 import {
     Dialog,
     DialogContent,
@@ -19,16 +20,6 @@ import {
     DialogHeader,
     DialogTitle,
 } from "@/components/ui/dialog";
-
-interface Task {
-    id: string;
-    title: string;
-    description?: string;
-    dueDate: Date;
-    priority: "high" | "medium" | "low";
-    status: "todo" | "in-progress" | "done";
-    assignee?: string;
-}
 
 interface CalendarEvent {
     id: string;
@@ -41,77 +32,13 @@ interface CalendarEvent {
     type: "meeting" | "task";
 }
 
-// Demo tasks for the calendar
-const demoTasks: Task[] = [
-    {
-        id: "t1",
-        title: "Review Q1 Product Roadmap",
-        description: "Review and finalize the Q1 product roadmap document",
-        dueDate: new Date(new Date().setDate(new Date().getDate() + 2)),
-        priority: "high",
-        status: "todo",
-        assignee: "Sarah Chen",
-    },
-    {
-        id: "t2",
-        title: "Prepare Client Presentation",
-        description: "Create presentation slides for upcoming client meeting",
-        dueDate: new Date(new Date().setDate(new Date().getDate() + 5)),
-        priority: "high",
-        status: "in-progress",
-        assignee: "Mike Johnson",
-    },
-    {
-        id: "t3",
-        title: "Update API Documentation",
-        description: "Document new API endpoints for emotion analysis",
-        dueDate: new Date(new Date().setDate(new Date().getDate() + 7)),
-        priority: "medium",
-        status: "todo",
-        assignee: "Alex Kumar",
-    },
-    {
-        id: "t4",
-        title: "Team Standup Meeting Prep",
-        description: "Prepare agenda and talking points for team standup",
-        dueDate: new Date(new Date().setDate(new Date().getDate() + 1)),
-        priority: "low",
-        status: "todo",
-        assignee: "Priya Patel",
-    },
-    {
-        id: "t5",
-        title: "Code Review: Emotion Module",
-        description: "Review pull request for emotion detection module",
-        dueDate: new Date(new Date().setDate(new Date().getDate() + 3)),
-        priority: "high",
-        status: "todo",
-        assignee: "Dev Team",
-    },
-    {
-        id: "t6",
-        title: "Update Meeting Notes Template",
-        description: "Revise the meeting notes template based on feedback",
-        dueDate: new Date(new Date().setDate(new Date().getDate() + 10)),
-        priority: "low",
-        status: "todo",
-        assignee: "Sarah Chen",
-    },
-    {
-        id: "t7",
-        title: "Schedule Q2 Planning Session",
-        description: "Coordinate with team to schedule Q2 planning meeting",
-        dueDate: new Date(new Date().setDate(new Date().getDate() + 4)),
-        priority: "medium",
-        status: "in-progress",
-        assignee: "Mike Johnson",
-    },
-];
+
 
 export default function CalendarPage() {
+    const { tasks: contextTasks } = useTaskContext();
     const [currentDate, setCurrentDate] = useState(new Date());
     const [meetings, setMeetings] = useState<Meeting[]>(mockMeetings);
-    const [tasks, setTasks] = useState<Task[]>(demoTasks);
+    const [tasks, setTasks] = useState<Task[]>([]);
     const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[]>([]);
     const [loading, setLoading] = useState(false);
     const [selectedMeeting, setSelectedMeeting] = useState<Meeting | null>(null);
@@ -121,6 +48,11 @@ export default function CalendarPage() {
     useEffect(() => {
         fetchMeetings();
     }, []);
+
+    // Update local tasks when context tasks change
+    useEffect(() => {
+        setTasks(contextTasks);
+    }, [contextTasks]);
 
     useEffect(() => {
         // Convert meetings to calendar events
