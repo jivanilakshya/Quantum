@@ -10,6 +10,9 @@ from typing import Optional, List, Dict, Any
 from sqlalchemy.orm import Session
 from services.vexa_client import VexaClient
 from services.ai_service import AIService
+from services.gemini_service import GeminiService
+from services.security import get_current_user
+from services.transcript_store import ensure_meeting, store_transcript_segments
 from database import get_db, Meeting, Transcript, Summary, ActionItem, Participant, Emotion, init_db
 from config import settings
 import logging
@@ -29,6 +32,7 @@ router = APIRouter()
 # Initialize Vexa client and AI service
 vexa_client = VexaClient(api_key=settings.vexa_api_key, base_url=settings.vexa_base_url)
 ai_service = AIService()
+gemini_service = GeminiService()
 
 # Initialize database on startup
 init_db()
@@ -44,12 +48,81 @@ class ProcessMeetingRequest(BaseModel):
     title: Optional[str] = None
 
 
+@router.post("/{meeting_id}/generate-summary")
+async def generate_summary(
+    meeting_id: str,
+    db: Session = Depends(get_db),
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    """
+    Generate (or regenerate) a Gemini meeting summary from stored transcript rows.
+    This is separate from /process so the UI can regenerate without re-running other pipelines.
+    """
+    try:
+        meeting = db.query(Meeting).filter(Meeting.meeting_id == meeting_id).first()
+        if meeting and meeting.owner_email and meeting.owner_email != str(user.get("sub")):
+            raise HTTPException(status_code=403, detail="You do not have access to this meeting")
+
+        rows = (
+            db.query(Transcript)
+            .filter(Transcript.meeting_id == meeting_id)
+            .order_by(Transcript.id.asc())
+            .all()
+        )
+        if not rows:
+            raise HTTPException(status_code=400, detail="No transcript stored for this meeting")
+
+        # Merge transcript text
+        lines: List[str] = []
+        for t in rows:
+            txt = (t.text or "").strip()
+            if not txt:
+                continue
+            sp = (t.speaker_name or t.speaker or "").strip()
+            lines.append(f"{sp}: {txt}" if sp else txt)
+        transcript_text = "\n".join(lines)
+        if not transcript_text.strip():
+            raise HTTPException(status_code=400, detail="Stored transcript is empty")
+
+        summary_data = gemini_service.generate_meeting_summary(transcript_text=transcript_text)
+
+        from database import MeetingSummary
+
+        existing = db.query(MeetingSummary).filter(MeetingSummary.meeting_id == meeting_id).first()
+        if existing:
+            db.delete(existing)
+            db.commit()
+
+        ms = MeetingSummary(
+            meeting_id=meeting_id,
+            short_summary=summary_data.get("short_summary"),
+            detailed_summary=summary_data.get("detailed_summary"),
+            key_points=json.dumps(summary_data.get("key_points", [])),
+            decisions=json.dumps(summary_data.get("decisions", [])),
+            action_items=json.dumps(summary_data.get("action_items", [])),
+            sentiment=json.dumps(summary_data.get("sentiment", {})),
+            meeting_outcome=summary_data.get("meeting_outcome"),
+            generated_by=gemini_service.model_name,
+            generated_at=datetime.utcnow(),
+        )
+        db.add(ms)
+        db.commit()
+
+        return {"success": True, "meeting_id": meeting_id, "summary": summary_data}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to generate summary for %s: %s", meeting_id, e)
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/{platform}/{meeting_id}/process")
 async def process_meeting(
     platform: str,
     meeting_id: str,
     request: ProcessMeetingRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: Dict[str, Any] = Depends(get_current_user),
 ):
     """
     Process a meeting with AI
@@ -58,98 +131,90 @@ async def process_meeting(
     try:
         logger.info(f"Processing meeting {meeting_id}")
         
-        # 1. Fetch transcript from Vexa
+        # 1. Fetch transcript from Vexa (normalized text + segments from extract_transcript)
         transcript_result = await vexa_client.get_transcript(platform, meeting_id)
-        
-        if not transcript_result or 'transcript' not in transcript_result:
-            logger.error(f"Transcript not found in Vexa result for {meeting_id}")
+
+        if not transcript_result:
+            logger.error("Vexa returned no result object for %s", meeting_id)
             raise HTTPException(status_code=404, detail="Transcript not found")
-        
-        # Parse transcript
-        transcript_data = transcript_result['transcript']
-        logger.info(f"Retrieved transcript data type: {type(transcript_data)} for {meeting_id}")
-        
-        if isinstance(transcript_data, str):
-            transcript_segments = [{"text": transcript_data}]
-            transcript_text = transcript_data
-        elif isinstance(transcript_data, list):
-            transcript_segments = transcript_data
-            transcript_text = "\n".join([
-                f"{seg.get('speaker', 'Unknown')}: {seg.get('text', '')}"
-                for seg in transcript_segments
-                if seg.get('text') # Only include segments with text
-            ])
-        elif isinstance(transcript_data, dict) and 'data' in transcript_data:
-            # Handle possible nested structure
-            logger.info(f"Handling nested dictionary transcript for {meeting_id}")
-            actual_data = transcript_data['data']
-            if isinstance(actual_data, list):
-                transcript_segments = actual_data
-                transcript_text = "\n".join([
-                    f"{seg.get('speaker', 'Unknown')}: {seg.get('text', '')}"
-                    for seg in transcript_segments
-                ])
-            else:
-                transcript_segments = [{"text": str(actual_data)}]
-                transcript_text = str(actual_data)
-        else:
-            logger.warning(f"Unexpected transcript data format for {meeting_id}: {type(transcript_data)}")
-            transcript_segments = []
-            transcript_text = ""
-        
+
+        transcript_text = (transcript_result.get("transcript_text") or "").strip()
+        transcript_segments = transcript_result.get("transcript_segments") or []
+
+        if not transcript_text and transcript_segments:
+            transcript_text = "\n".join(
+                f"{s.get('speaker')}: {s.get('text', '')}" if s.get("speaker") else (s.get("text") or "")
+                for s in transcript_segments
+                if (s.get("text") or "").strip()
+            )
+
+        if transcript_text and not transcript_segments:
+            transcript_segments = [
+                {"speaker": None, "text": line.strip(), "timestamp": None}
+                for line in transcript_text.split("\n")
+                if line.strip()
+            ]
+
+        logger.info(
+            "Retrieved transcript for %s length=%s segments=%s reason=%s",
+            meeting_id,
+            len(transcript_text),
+            len(transcript_segments),
+            transcript_result.get("reason"),
+        )
+
         if not transcript_text or transcript_text.strip() == "":
-            logger.error(f"Empty transcript for {meeting_id}")
-            raise HTTPException(status_code=400, detail="Empty transcript")
+            reason = transcript_result.get("reason", "unknown")
+            msg = transcript_result.get("message", "Empty transcript")
+            logger.error("Empty transcript for %s (%s): %s", meeting_id, reason, msg)
+            raise HTTPException(status_code=400, detail=msg if msg else "Empty transcript")
         
         logger.info(f"Successfully parsed transcript for {meeting_id}, length: {len(transcript_text)}")
         
-        # 2. Create or update meeting record
-        meeting = db.query(Meeting).filter(Meeting.meeting_id == meeting_id).first()
-        if not meeting:
-            meeting = Meeting(
-                platform=platform,
-                meeting_id=meeting_id,
-                title=request.title or f"Meeting {meeting_id}",
-                status="processing"
-            )
-            db.add(meeting)
-            db.commit()
-            db.refresh(meeting)
-        else:
-            meeting.status = "processing"
-            db.commit()
-        
-        # 3. Save transcript segments
-        # Clear existing transcripts
-        db.query(Transcript).filter(Transcript.meeting_id == meeting_id).delete()
-        
-        for segment in transcript_segments:
-            transcript_record = Transcript(
-                meeting_id=meeting_id,
-                speaker=segment.get('speaker'),
-                timestamp=segment.get('timestamp'),
-                text=segment.get('text', '')
-            )
-            db.add(transcript_record)
+        owner_email = str(user.get("sub"))
+        meeting = ensure_meeting(
+            db,
+            platform=platform,
+            meeting_id=meeting_id,
+            owner_email=owner_email,
+            title=request.title,
+        )
+        meeting.status = "processing"
         db.commit()
         
-        # 4. Generate AI summary
-        summary_data = ai_service.generate_summary(transcript_text)
+        # 3. Save transcript segments incrementally (avoid duplicates)
+        store_transcript_segments(
+            db,
+            platform=platform,
+            meeting_id=meeting_id,
+            segments=transcript_segments,
+            owner_email=owner_email,
+        )
         
-        # Save or update summary
-        summary_record = db.query(Summary).filter(Summary.meeting_id == meeting_id).first()
-        if summary_record:
-            summary_record.summary = summary_data.get('summary', '')
-            summary_record.key_points = json.dumps(summary_data.get('key_points', []))
-            summary_record.decisions = json.dumps(summary_data.get('decisions', []))
-        else:
-            summary_record = Summary(
-                meeting_id=meeting_id,
-                summary=summary_data.get('summary', ''),
-                key_points=json.dumps(summary_data.get('key_points', [])),
-                decisions=json.dumps(summary_data.get('decisions', []))
-            )
-            db.add(summary_record)
+        # 4. Generate AI summary (Gemini structured output)
+        summary_data = gemini_service.generate_meeting_summary(transcript_text=transcript_text)
+        
+        # Save or update production meeting summary
+        from database import MeetingSummary
+
+        existing = db.query(MeetingSummary).filter(MeetingSummary.meeting_id == meeting_id).first()
+        if existing:
+            db.delete(existing)
+            db.commit()
+
+        summary_record = MeetingSummary(
+            meeting_id=meeting_id,
+            short_summary=summary_data.get("short_summary"),
+            detailed_summary=summary_data.get("detailed_summary"),
+            key_points=json.dumps(summary_data.get("key_points", [])),
+            decisions=json.dumps(summary_data.get("decisions", [])),
+            action_items=json.dumps(summary_data.get("action_items", [])),
+            sentiment=json.dumps(summary_data.get("sentiment", {})),
+            meeting_outcome=summary_data.get("meeting_outcome"),
+            generated_by=gemini_service.model_name,
+            generated_at=datetime.utcnow(),
+        )
+        db.add(summary_record)
         db.commit()
         
         # 5. Extract action items
@@ -214,11 +279,11 @@ async def process_meeting(
             "message": "Meeting processed successfully",
             "data": {
                 "meeting_id": meeting_id,
-                "summary": summary_data.get('summary'),
+                "summary": summary_data,
                 "action_items_count": len(action_items_data),
                 "participants_count": len(participants_list),
-                "overall_emotion_score": overall_score
-            }
+                "overall_emotion_score": overall_score,
+            },
         }
         
     except Exception as e:
@@ -234,10 +299,35 @@ async def process_meeting(
 async def get_meeting_summary(
     platform: str,
     meeting_id: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: Dict[str, Any] = Depends(get_current_user),
 ):
     """Get AI-generated summary for a meeting"""
     try:
+        # Prefer production meeting summary table if present.
+        from database import MeetingSummary
+
+        meeting = db.query(Meeting).filter(Meeting.meeting_id == meeting_id).first()
+        if meeting and meeting.owner_email and meeting.owner_email != str(user.get("sub")):
+            raise HTTPException(status_code=403, detail="You do not have access to this meeting")
+
+        ms = db.query(MeetingSummary).filter(MeetingSummary.meeting_id == meeting_id).first()
+        if ms:
+            return {
+                "success": True,
+                "meeting_id": meeting_id,
+                "short_summary": ms.short_summary,
+                "detailed_summary": ms.detailed_summary,
+                "key_points": json.loads(ms.key_points) if ms.key_points else [],
+                "decisions": json.loads(ms.decisions) if ms.decisions else [],
+                "action_items": json.loads(ms.action_items) if ms.action_items else [],
+                "sentiment": json.loads(ms.sentiment) if ms.sentiment else {},
+                "meeting_outcome": ms.meeting_outcome,
+                "generated_by": ms.generated_by,
+                "generated_at": ms.generated_at.isoformat() if ms.generated_at else None,
+            }
+
+        # Backward-compat fallback
         summary = db.query(Summary).filter(Summary.meeting_id == meeting_id).first()
         
         if not summary:

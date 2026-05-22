@@ -6,7 +6,7 @@ Handles Vexa AI bot operations
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional, List
-from services.vexa_client import VexaClient, BotRequest
+from services.vexa_client import BotRequest, VexaClient, normalize_bots_status_payload
 from config import settings
 import logging
 
@@ -153,12 +153,13 @@ async def get_bot_status():
     Get status of all running bots
     """
     try:
-        bots = await vexa_client.get_bot_status()
-        
+        raw_status = await vexa_client.get_bot_status()
+        bots = normalize_bots_status_payload(raw_status)
+
         return {
             "success": True,
-            "active_bots": len(bots) if isinstance(bots, list) else 0,
-            "bots": bots
+            "active_bots": len(bots),
+            "bots": bots,
         }
         
     except Exception as e:

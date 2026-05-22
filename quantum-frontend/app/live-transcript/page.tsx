@@ -11,14 +11,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Brain, RefreshCw, Download, AlertCircle, Radio, Copy, Check } from "lucide-react";
 import { apiClient } from "@/lib/api-client";
+import { parseTranscriptApiResponse, TranscriptSegment } from "@/lib/transcript-utils";
 import { toast } from "sonner";
-
-interface TranscriptSegment {
-    speaker?: string;
-    timestamp?: string;
-    text: string;
-    language?: string;
-}
 
 interface ActiveBot {
     platform: string;
@@ -34,6 +28,8 @@ export default function LiveTranscriptPage() {
     const [autoRefresh, setAutoRefresh] = useState(true);
     const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
     const [copied, setCopied] = useState(false);
+    /** API error shown inline (polling would spam toast.error). */
+    const [transcriptError, setTranscriptError] = useState<string | null>(null);
     const transcriptEndRef = useRef<HTMLDivElement>(null);
     const intervalRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -85,31 +81,29 @@ export default function LiveTranscriptPage() {
 
         setLoading(true);
         try {
-            const result = await apiClient.getTranscript(
+            const raw = await apiClient.getTranscript(
                 selectedBot.platform,
                 selectedBot.native_meeting_id
             );
+            const { segments, error: parseError } = parseTranscriptApiResponse(raw);
 
-            if (result.transcript) {
-                // Handle different transcript formats from Vexa API
-                let segments: TranscriptSegment[] = [];
-
-                if (Array.isArray(result.transcript)) {
-                    segments = result.transcript;
-                } else if (typeof result.transcript === 'string') {
-                    // If transcript is a string, split into segments
-                    segments = [{ text: result.transcript, timestamp: new Date().toISOString() }];
-                } else if (result.transcript.segments) {
-                    segments = result.transcript.segments;
-                }
-
+            if (parseError) {
+                setTranscriptError(parseError);
+                setTranscript([]);
+            } else {
+                setTranscriptError(null);
                 setTranscript(segments);
                 setLastUpdate(new Date());
             }
         } catch (error: any) {
             console.error("Failed to fetch transcript:", error);
-            if (error.message.includes("404") || error.message.includes("not found")) {
-                toast.error("No transcript available yet. Make sure the bot has joined the meeting.");
+            const msg =
+                error.message?.includes("404") || error.message?.includes("not found")
+                    ? "No transcript available yet. Make sure the bot has joined the meeting."
+                    : (error.message as string) || "Failed to load transcript.";
+            setTranscriptError(msg);
+            if (error.message?.includes("404") || error.message?.includes("not found")) {
+                toast.error(msg);
             }
         } finally {
             setLoading(false);
@@ -296,6 +290,13 @@ export default function LiveTranscriptPage() {
                 )}
 
                 {/* Transcript Display */}
+                {selectedBot && transcriptError && (
+                    <Alert variant="destructive" className="mb-6">
+                        <AlertCircle className="h-4 w-4" />
+                        <AlertDescription>{transcriptError}</AlertDescription>
+                    </Alert>
+                )}
+
                 {selectedBot && (
                     <Card>
                         <CardHeader className="flex flex-row items-center justify-between">

@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -28,14 +29,9 @@ import {
 import { mockMeetings } from "@/lib/mock-data";
 import { format } from "date-fns";
 import { apiClient } from "@/lib/api-client";
+import { parseTranscriptApiResponse, TranscriptSegment } from "@/lib/transcript-utils";
 import { toast } from "sonner";
 import { generateMockPDF } from "./pdf-genretor";
-
-interface TranscriptSegment {
-    speaker?: string;
-    timestamp?: string;
-    text: string;
-}
 
 export default function MeetingPage({ params }: { params: { id: string } }) {
     // Use the first mock meeting as default
@@ -48,6 +44,7 @@ export default function MeetingPage({ params }: { params: { id: string } }) {
     const [meetingId, setMeetingId] = useState("");
     const [autoRefresh, setAutoRefresh] = useState(true);
     const [loading, setLoading] = useState(false);
+    const [liveTranscriptError, setLiveTranscriptError] = useState<string | null>(null);
     const transcriptEndRef = useRef<HTMLDivElement>(null);
     const intervalRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -79,26 +76,22 @@ export default function MeetingPage({ params }: { params: { id: string } }) {
 
         setLoading(true);
         try {
-            const result = await apiClient.getTranscript(meetingPlatform, meetingId);
+            const raw = await apiClient.getTranscript(meetingPlatform, meetingId);
+            const { segments, error: parseError } = parseTranscriptApiResponse(raw);
 
-            if (result.transcript) {
-                let segments: TranscriptSegment[] = [];
-
-                if (Array.isArray(result.transcript)) {
-                    segments = result.transcript;
-                } else if (typeof result.transcript === 'string') {
-                    segments = [{ text: result.transcript, timestamp: new Date().toISOString() }];
-                } else if (result.transcript.segments) {
-                    segments = result.transcript.segments;
-                }
-
+            if (parseError) {
+                setLiveTranscriptError(parseError);
+                setLiveTranscript([]);
+            } else {
+                setLiveTranscriptError(null);
                 setLiveTranscript(segments);
             }
         } catch (error: any) {
             console.error("Failed to fetch live transcript:", error);
-            if (!error.message.includes("404")) {
-                toast.error("Failed to fetch live transcript");
-            }
+            const msg = error.message?.includes?.("404")
+                ? "Transcript not found for this meeting."
+                : ((error.message as string) || "Failed to fetch live transcript");
+            setLiveTranscriptError(msg);
         } finally {
             setLoading(false);
         }
@@ -371,6 +364,13 @@ export default function MeetingPage({ params }: { params: { id: string } }) {
                                                         </Button>
                                                     </div>
                                                 </div>
+
+                                                {liveTranscriptError && (
+                                                    <Alert variant="destructive">
+                                                        <AlertCircle className="h-4 w-4" />
+                                                        <AlertDescription>{liveTranscriptError}</AlertDescription>
+                                                    </Alert>
+                                                )}
 
                                                 <div className="max-h-[500px] overflow-y-auto space-y-3 p-4 rounded-lg border bg-muted/20">
                                                     {loading && liveTranscript.length === 0 ? (

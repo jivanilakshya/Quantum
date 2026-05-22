@@ -23,7 +23,8 @@ class Settings(BaseSettings):
     # JWT Configuration
     secret_key: str = "change-this-secret-key-in-production"
     algorithm: str = "HS256"
-    access_token_expire_minutes: int = 30
+    access_token_expire_minutes: int = 1440
+    refresh_token_expire_days: int = 7
     
     # CORS Configuration
     frontend_url: str = "http://localhost:3000"
@@ -48,7 +49,7 @@ class Settings(BaseSettings):
     model_type_prod: str = "keras"
     device_type: str = "auto"
     
-    model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
+    model_config = SettingsConfigDict(env_file=".env", case_sensitive=False, extra="ignore")
 
 
 # Global settings instance

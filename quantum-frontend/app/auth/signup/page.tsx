@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Brain } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
+import { apiClient } from "@/lib/api-client";
 
 export default function SignupPage() {
     const router = useRouter();
@@ -19,15 +20,30 @@ export default function SignupPage() {
         password: "",
         role: "",
     });
+    const [loading, setLoading] = useState(false);
 
-    const handleSignup = (e: React.FormEvent) => {
+    const handleSignup = async (e: React.FormEvent) => {
         e.preventDefault();
-        // Mock signup - in production, this would call an API
-        if (formData.name && formData.email && formData.password && formData.role) {
+
+        if (!formData.name || !formData.email || !formData.password || !formData.role) {
+            toast.error("Please fill in all fields");
+            return;
+        }
+
+        setLoading(true);
+        try {
+            const response = await apiClient.signup(
+                formData.name,
+                formData.email,
+                formData.password,
+                formData.role
+            );
             toast.success("Account created successfully!");
             router.push("/dashboard");
-        } else {
-            toast.error("Please fill in all fields");
+        } catch (error) {
+            toast.error(error instanceof Error ? error.message : "Signup failed");
+        } finally {
+            setLoading(false);
         }
     };
 
@@ -97,9 +113,10 @@ export default function SignupPage() {
                         </div>
                         <Button
                             type="submit"
+                            disabled={loading}
                             className="w-full bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700"
                         >
-                            Create Account
+                            {loading ? "Creating Account..." : "Create Account"}
                         </Button>
                     </form>
                     <div className="mt-6 text-center text-sm">

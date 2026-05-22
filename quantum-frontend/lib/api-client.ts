@@ -308,4 +308,5 @@ class APIClient {
     }
 }
 
+export { APIClient };
 export const apiClient = new APIClient();
